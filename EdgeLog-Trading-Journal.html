@@ -836,14 +836,13 @@ body{
           <div class="settings-card">
             <div class="sc-title">API Données de Marché</div>
             <div style="font-family:var(--font-mono);font-size:11px;color:var(--text3);margin-bottom:14px;line-height:1.7">
-              Binance API est utilisée gratuitement pour crypto (aucune clé requise).<br>
-              Pour Forex/Indices/Actions, configurez une clé API ci-dessous.
+              Binance API utilisée pour crypto (gratuit, sans clé).<br>TwelveData configuré et actif pour Forex, Indices et Commodités.
             </div>
             <div style="display:flex;flex-direction:column;gap:12px">
               <div>
                 <label class="form-label">TwelveData API Key <span style="color:var(--text3)">(Forex, Indices, Actions)</span></label>
                 <div class="api-key-row">
-                  <input class="input" type="password" id="s-twelvedata" placeholder="Clé API TwelveData">
+                  <input class="input" type="password" id="s-twelvedata" placeholder="Clé API TwelveData" value="9ef5f78136414f7b85cd071751468fa5">
                   <button class="btn btn-ghost btn-sm" onclick="testAPI('twelvedata')">Tester</button>
                 </div>
                 <div class="input-note">Gratuit: 800 req/jour — <a href="https://twelvedata.com" target="_blank" style="color:var(--accent)">twelvedata.com</a></div>
@@ -1080,7 +1079,7 @@ body{
 
 // ─── STATE ────────────────────────────────────────────
 let TRADES = [];
-let SETTINGS = { name:'', capital:'', currency:'USD', twelvedata:'', finnhub:'' };
+let SETTINGS = { name:'', capital:'', currency:'USD', twelvedata:'9ef5f78136414f7b85cd071751468fa5', finnhub:'' };
 let editDir = 'BUY';
 let editResult = null;
 let editImages = [];
@@ -1148,14 +1147,16 @@ async function fetchBinancePrice(symbol) {
 
 // TwelveData (forex, indices, stocks, crypto)
 async function fetchTwelveData(symbol) {
-  const key = SETTINGS.twelvedata;
-  if (!key) throw new Error('Clé TwelveData non configurée');
-  const url = `https://api.twelvedata.com/price?symbol=${symbol.toUpperCase()}&apikey=${key}`;
+  const key = SETTINGS.twelvedata || '9ef5f78136414f7b85cd071751468fa5';
+  // Use quote endpoint to get price + change %
+  const url = `https://api.twelvedata.com/quote?symbol=${symbol.toUpperCase()}&apikey=${key}`;
   const r = await fetch(url);
   if (!r.ok) throw new Error('TwelveData: '+r.status);
   const d = await r.json();
   if (d.status === 'error') throw new Error('TwelveData: '+d.message);
-  return { price: parseFloat(d.price), change: null, source:'TwelveData', symbol };
+  const price = parseFloat(d.close || d.price || 0);
+  const change = d.percent_change ? parseFloat(d.percent_change) : null;
+  return { price, change, source:'TwelveData', symbol };
 }
 
 // Finnhub (stocks)
@@ -1224,6 +1225,8 @@ const TICKER_SYMBOLS = [
   {sym:'SOLUSDT', label:'SOL/USD', type:'crypto'},
   {sym:'BNBUSDT', label:'BNB/USD', type:'crypto'},
   {sym:'XRPUSDT', label:'XRP/USD', type:'crypto'},
+  {sym:'DOGEUSDT', label:'DOGE/USD', type:'crypto'},
+  {sym:'ADAUSDT', label:'ADA/USD', type:'crypto'},
 ];
 
 async function loadTicker() {
@@ -1268,44 +1271,79 @@ const WATCHLIST = [
   {sym:'BTCUSDT',label:'BTC/USD',type:'crypto'},
   {sym:'ETHUSDT',label:'ETH/USD',type:'crypto'},
   {sym:'SOLUSDT',label:'SOL/USD',type:'crypto'},
+  {sym:'BNBUSDT',label:'BNB/USD',type:'crypto'},
+  {sym:'XRPUSDT',label:'XRP/USD',type:'crypto'},
+];
+
+// Extended market data: Crypto via Binance + Forex/Indices via TwelveData
+const FOREX_WATCHLIST = [
+  {sym:'EUR/USD', label:'EUR/USD', type:'forex'},
+  {sym:'GBP/USD', label:'GBP/USD', type:'forex'},
+  {sym:'XAU/USD', label:'XAU/USD', type:'commodities'},
+  {sym:'USD/JPY',  label:'USD/JPY',  type:'forex'},
 ];
 
 async function loadMarketWidget(containerId = 'mw-grid') {
   const el = document.getElementById(containerId);
   if (!el) return;
 
-  // Skeleton
-  el.innerHTML = WATCHLIST.map(s => `
+  // Show skeleton
+  const allItems = [...WATCHLIST, ...FOREX_WATCHLIST];
+  el.innerHTML = allItems.map(s => `
     <div class="mw-item loading">
       <div class="mw-sym">${s.label}</div>
-      <div class="mw-price" style="color:var(--text3)">Chargement...</div>
+      <div class="mw-price" style="color:var(--text3)">...</div>
       <div class="mw-type">${s.type}</div>
-    </div>
-  `).join('');
+    </div>`).join('');
 
-  const results = await Promise.allSettled(WATCHLIST.map(s => fetchBinancePrice(s.sym)));
+  // Fetch crypto (Binance) + Forex (TwelveData) in parallel
+  const [cryptoResults, forexResults] = await Promise.all([
+    Promise.allSettled(WATCHLIST.map(s => fetchBinancePrice(s.sym))),
+    Promise.allSettled(FOREX_WATCHLIST.map(s => fetchTwelveData(s.sym))),
+  ]);
 
-  el.innerHTML = results.map((r, i) => {
+  let html = '';
+
+  cryptoResults.forEach((r, i) => {
     const s = WATCHLIST[i];
     if (r.status === 'fulfilled') {
       const d = r.value;
       const chg = d.change;
       const color = chg >= 0 ? 'var(--bull)' : 'var(--bear)';
       const sign = chg >= 0 ? '+' : '';
-      return `<div class="mw-item" onclick="useMarketPrice('${s.sym}','${s.label}',${d.price})">
+      const dec = d.price > 1000 ? 2 : d.price > 1 ? 4 : 6;
+      html += `<div class="mw-item" onclick="useMarketPrice('${s.sym}','${s.label}',${d.price})">
         <div class="mw-sym">${s.label}</div>
-        <div class="mw-price" style="color:${color}">${fmtPrice(d.price, 2)}</div>
+        <div class="mw-price" style="color:${color}">${fmtPrice(d.price, dec)}</div>
         <div class="mw-chg" style="color:${color}">${sign}${chg.toFixed(2)}%</div>
         <div class="mw-type">${s.type} · Binance</div>
       </div>`;
     } else {
-      return `<div class="mw-item">
-        <div class="mw-sym">${s.label}</div>
-        <div class="mw-price" style="color:var(--text3)">N/A</div>
-        <div class="mw-type" style="color:var(--bear)">Erreur</div>
-      </div>`;
+      html += `<div class="mw-item"><div class="mw-sym">${s.label}</div><div class="mw-price" style="color:var(--text3)">N/A</div><div class="mw-type" style="color:var(--bear)">Erreur</div></div>`;
     }
-  }).join('');
+  });
+
+  forexResults.forEach((r, i) => {
+    const s = FOREX_WATCHLIST[i];
+    if (r.status === 'fulfilled') {
+      const d = r.value;
+      const chg = d.change;
+      const color = chg != null ? (chg >= 0 ? 'var(--bull)' : 'var(--bear)') : 'var(--text)';
+      const sign = chg != null && chg >= 0 ? '+' : '';
+      const dec = d.price > 500 ? 2 : 5;
+      html += `<div class="mw-item" onclick="useMarketPrice('${s.sym}','${s.label}',${d.price})">
+        <div class="mw-sym">${s.label}</div>
+        <div class="mw-price" style="color:${color}">${fmtPrice(d.price, dec)}</div>
+        <div class="mw-chg" style="color:${color}">${chg != null ? sign+chg.toFixed(2)+'%' : ''}</div>
+        <div class="mw-type">${s.type} · TwelveData</div>
+      </div>`;
+      setAPIStatus('td', true);
+    } else {
+      html += `<div class="mw-item"><div class="mw-sym">${s.label}</div><div class="mw-price" style="color:var(--text3)">N/A</div><div class="mw-type" style="color:var(--text3)">TwelveData</div></div>`;
+    }
+  });
+
+  el.innerHTML = html;
 }
 
 // ─── PRICE IN MODAL ────────────────────────────────────
@@ -1461,12 +1499,21 @@ async function init() {
   if (SETTINGS.name) document.getElementById('s-name').value = SETTINGS.name;
   if (SETTINGS.capital) document.getElementById('s-capital').value = SETTINGS.capital;
   if (SETTINGS.currency) document.getElementById('s-currency').value = SETTINGS.currency;
+  // TwelveData key pre-configured
   if (SETTINGS.twelvedata) document.getElementById('s-twelvedata').value = SETTINGS.twelvedata;
+  else { SETTINGS.twelvedata = '9ef5f78136414f7b85cd071751468fa5'; document.getElementById('s-twelvedata').value = '9ef5f78136414f7b85cd071751468fa5'; }
   if (SETTINGS.finnhub) document.getElementById('s-finnhub').value = SETTINGS.finnhub;
 
   // Default datetime
   const n = new Date(); n.setMinutes(n.getMinutes() - n.getTimezoneOffset());
   document.getElementById('f-dt').value = n.toISOString().slice(0,16);
+
+  // Auto-persist TwelveData key if not already saved
+  const existingKey = rawSettings.find(s => s.key === 'twelvedata');
+  if (!existingKey || !existingKey.value) {
+    SETTINGS.twelvedata = '9ef5f78136414f7b85cd071751468fa5';
+    await dbPut('settings', {key:'twelvedata', value:'9ef5f78136414f7b85cd071751468fa5'});
+  }
 
   setupNav();
   setupEventListeners();
